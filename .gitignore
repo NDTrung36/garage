@@ -1,0 +1,24 @@
+# Local settings and secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Java / Maven
+**/target/
+*.log
+
+# Frontend
+**/node_modules/
+**/dist/
+*.tsbuildinfo
+
+# Local build caches
+.cache/
+.npm-cache/
+.m2-cache/
