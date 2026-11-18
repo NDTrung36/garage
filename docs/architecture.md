@@ -111,10 +111,11 @@ Nếu unique constraint vẫn báo xung đột, rollback transaction ngoài cùn
 
 ### 3.2 Sinh slot và đổi cấu hình
 
-- Sinh sẵn slot từ ngày hiện tại đến hết ngày `today + maximum_advance_days` khi khởi động, mỗi ngày lúc 00:05 bằng scheduler có timezone `Asia/Ho_Chi_Minh`, và ngay trong transaction thay đổi cấu hình/ngày nghỉ của Admin. Job chỉ bổ sung phần thiếu khi cấu hình không đổi; unique `(starts_at, vehicle_type)` chống trùng.
+- Đối soát slot từ ngày hiện tại đến hết ngày `today + maximum_advance_days` khi khởi động, mỗi ngày lúc 00:05 theo `Asia/Ho_Chi_Minh`, trong transaction thay đổi cấu hình/ngày nghỉ và khi Admin yêu cầu sinh bù. Chạy lại với cùng dữ liệu không tạo trùng hoặc tăng version của slot không đổi.
 - `GET /public/slots` chỉ SELECT trong transaction read-only; không INSERT, không lấy update lock trên garage_settings. Spring readOnly là khai báo ý định, không thay cho kiểm tra code/query để bảo đảm đường đọc không ghi.
 - Sinh slot và sửa cấu hình khóa cùng hàng garage_settings rồi khóa các slot liên quan theo thứ tự ID. Cập nhật `generated_through` cùng transaction để đánh dấu đã xử lý đủ cả ngày nghỉ không có slot.
-- Chỉ thay/tạo lại slot tương lai chưa có bất kỳ booking; giữ nguyên slot đã có lịch. Khi đổi thời lượng, không sinh slot mới giao thời gian với slot đang được giữ lại của cùng loại xe. Slot được giữ nhưng không còn hợp cấu hình mới phải đóng nhận thêm, vẫn cho check-in lịch cũ.
+- Chỉ thay/tạo lại slot tương lai chưa có booking hoặc điều chỉnh riêng. Giữ ID, khung giờ và sức chứa của slot có booking khi đổi mẫu lịch. Slot được giữ nhưng không còn hợp cấu hình mới phải đóng nhận thêm, vẫn cho check-in lịch cũ. Slot mới cùng loại xe không được giao với slot giữ lại.
+- `manual_closed` lưu quyết định đóng của Admin. `capacity_override` lưu sức chứa riêng, kể cả 0. Bỏ ngày nghỉ không mở lại slot bị đóng riêng. Khi xóa override cuối cùng, slot không có booking và nằm ngoài mẫu mới có thể bị xóa.
 - Đóng slot/ngày nghỉ ngăn đặt thêm nhưng không hủy các lịch tồn tại. Check-in lịch đã xác nhận vẫn được phép.
 - Startup chỉ sẵn sàng phục vụ booking sau khi sinh slot thành công. Nếu job thất bại, giữ dữ liệu đã commit và ghi lỗi vận hành; ngày vượt `generated_through` trả `503 SLOT_SCHEDULE_UNAVAILABLE`. Ngày đã sinh nhưng đóng cửa trả danh sách rỗng. Không sinh bù trong GET.
 - UI availability chỉ là gợi ý tại thời điểm đọc; server luôn kiểm tra lại khi đặt.
@@ -225,7 +226,9 @@ Chỉ public services/slots/bookings/lookups và cơ chế lấy CSRF/login cầ
 | Danh mục | `GET/POST /admin/services`, `PATCH /admin/services/{id}`; `GET/POST /admin/parts`, `PATCH /admin/parts/{id}` |
 | Nhập/điều chỉnh kho | `POST /admin/stock-receipts`, `POST /admin/stock-adjustments` |
 | Sửa nhầm thu tiền | `POST /admin/invoices/{id}/reset-payment`, bắt buộc reason |
-| Cấu hình lịch | `GET/PUT /admin/schedule-settings`, `GET/POST /admin/closed-dates`, `DELETE /admin/closed-dates/{id}`, `PATCH /admin/slots/{id}` |
+| Cấu hình lịch | `GET/PUT /admin/schedule-settings`, `GET/POST /admin/closed-dates`, `DELETE /admin/closed-dates/{id}`, `GET /admin/slots`, `PATCH /admin/slots/{id}`, `POST /admin/schedule/regenerate` |
+
+`PUT /admin/schedule-settings` gửi `expectedVersion`, các thông số lịch và mảng `workingHours` gồm `dayOfWeek`, `opensAt` và `closesAt`. Ngày nghỉ dùng `date` và `reason`. POST thêm ngày nghỉ gửi `expectedSettingsVersion` trong JSON, DELETE nhận version này qua query. GET ngày nghỉ nhận `from` và `through`, đều tính cả ngày biên. GET slot Admin nhận `date` và `vehicleType`. PATCH slot gửi `expectedVersion`, `manualClosed` và `capacityOverride`, với `null` để bỏ sức chứa riêng. Trả `204` nếu thao tác bỏ override khiến slot không còn hợp mẫu và bị xóa.
 
 Các path rút gọn trong một ô giữ nguyên prefix của path đầy đủ cùng hàng. Không hỗ trợ DELETE booking, invoice, movement hoặc danh mục có lịch sử. Thao tác danh mục dùng active=false khi ngừng sử dụng.
 

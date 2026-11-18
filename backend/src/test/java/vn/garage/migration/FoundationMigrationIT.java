@@ -8,6 +8,11 @@ import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
+import vn.garage.catalog.application.ServiceCatalog;
+import vn.garage.repair.application.SlotGenerator;
+import vn.garage.repair.domain.SlotPlan.Hours;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -15,8 +20,14 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
@@ -39,11 +50,11 @@ class FoundationMigrationIT {
             Map.entry("users", "id:bigint username:nvarchar(100) password_hash:varchar(255) display_name:nvarchar(100) role:varchar(10) active:bit auth_version:bigint created_at:datetimeoffset(3) updated_at:datetimeoffset(3)"),
             Map.entry("customers", "id:bigint full_name:nvarchar(100) phone_normalized:varchar(20) created_at:datetimeoffset(3) updated_at:datetimeoffset(3)"),
             Map.entry("vehicles", "id:bigint customer_id:bigint vehicle_type:varchar(10) plate_display:nvarchar(20) plate_normalized:nvarchar(20) brand:nvarchar(100)? model:nvarchar(100)? created_at:datetimeoffset(3) updated_at:datetimeoffset(3)"),
-            Map.entry("services", "id:bigint code:varchar(40) name:nvarchar(150) description:nvarchar(1000)? vehicle_type:varchar(10) reference_price:decimal(18,0) active:bit created_at:datetimeoffset(3) updated_at:datetimeoffset(3)"),
+            Map.entry("services", "id:bigint code:varchar(40) name:nvarchar(150) description:nvarchar(1000)? vehicle_type:varchar(10) reference_price:decimal(18,0) active:bit created_at:datetimeoffset(3) updated_at:datetimeoffset(3) version:bigint"),
             Map.entry("garage_settings", "id:tinyint timezone:varchar(50) slot_minutes:int car_capacity:int motorbike_capacity:int minimum_lead_minutes:int maximum_advance_days:int generated_through:date? version:bigint created_at:datetimeoffset(3) updated_at:datetimeoffset(3)"),
             Map.entry("working_hours", "id:bigint day_of_week:tinyint opens_at:time(0) closes_at:time(0) created_at:datetimeoffset(3) updated_at:datetimeoffset(3)"),
             Map.entry("calendar_exceptions", "id:bigint closed_date:date reason:nvarchar(500) created_at:datetimeoffset(3) updated_at:datetimeoffset(3)"),
-            Map.entry("appointment_slots", "id:bigint starts_at:datetimeoffset(3) ends_at:datetimeoffset(3) vehicle_type:varchar(10) capacity:int closed:bit version:bigint created_at:datetimeoffset(3) updated_at:datetimeoffset(3)"),
+            Map.entry("appointment_slots", "id:bigint starts_at:datetimeoffset(3) ends_at:datetimeoffset(3) vehicle_type:varchar(10) capacity:int closed:bit version:bigint created_at:datetimeoffset(3) updated_at:datetimeoffset(3) manual_closed:bit capacity_override:int?"),
             Map.entry("bookings", "id:bigint code:varchar(24) customer_id:bigint vehicle_id:bigint slot_id:bigint? source:varchar(10) status:varchar(20) vehicle_type_snapshot:varchar(10) contact_name_snapshot:nvarchar(100) contact_phone_snapshot:varchar(20) plate_snapshot:nvarchar(20) plate_normalized_snapshot:nvarchar(20) brand_snapshot:nvarchar(100)? model_snapshot:nvarchar(100)? customer_note:nvarchar(1000)? created_by:bigint? status_reason:nvarchar(500)? version:bigint created_at:datetimeoffset(3) updated_at:datetimeoffset(3)"),
             Map.entry("booking_services", "id:bigint booking_id:bigint service_id:bigint service_name_snapshot:nvarchar(150) reference_price_snapshot:decimal(18,0)"),
             Map.entry("idempotency_records", "scope:varchar(100) request_key:varchar(100) request_hash:char(64) http_status:int response_json:nvarchar(max) created_at:datetimeoffset(3) expires_at:datetimeoffset(3)")
@@ -84,7 +95,7 @@ class FoundationMigrationIT {
         assertEquals(0, flyway.migrate().migrationsExecuted);
         flyway.validate();
         try (Connection c = connect()) {
-            assertEquals("3", scalar(c, "SELECT COUNT(*) FROM dbo.flyway_schema_history WHERE success = 1"));
+            assertEquals("4", scalar(c, "SELECT COUNT(*) FROM dbo.flyway_schema_history WHERE success = 1"));
             assertEquals("1", scalar(c, "SELECT COUNT(*) FROM dbo.garage_settings"));
             assertEquals("12", scalar(c, "SELECT COUNT(*) FROM dbo.working_hours"));
             assertEquals("60:1:2:60:14:Asia/Ho_Chi_Minh", scalar(c, "SELECT CONCAT(slot_minutes,':',car_capacity,':',motorbike_capacity,':',minimum_lead_minutes,':',maximum_advance_days,':',timezone) FROM dbo.garage_settings WHERE id=1 AND generated_through IS NULL"));
@@ -230,6 +241,100 @@ class FoundationMigrationIT {
             reject(c, Set.of(547), "INSERT dbo.users(username,password_hash,display_name,role) VALUES(N'bad','hash',N'Nhân viên','CUSTOMER')");
             long customer = customer(c, "+84912345678"), vehicle = vehicle(c, customer);
             assertSqlError(Set.of(547), () -> booking(c, "BK-BADSTATUS", customer, vehicle, slot, "ONLINE", "OPEN", null));
+        });
+    }
+
+    @Test
+    void schedulingUsesConfiguredHorizonAndKeepsOverridesAcrossHolidays() throws Exception {
+        inTransaction(c -> {
+            var jdbc = new JdbcTemplate(new SingleConnectionDataSource(c, true));
+            var generator = new SlotGenerator(jdbc, Clock.fixed(Instant.parse("2031-01-06T00:00:00Z"), ZoneOffset.UTC));
+            LocalDate monday = LocalDate.parse("2031-01-06");
+            var pending = assertThrows(SlotGenerator.ScheduleException.class,
+                    () -> generator.availability(monday, "MOTORBIKE"));
+            assertEquals("SLOT_SCHEDULE_UNAVAILABLE", pending.getMessage());
+            execute(c, "UPDATE dbo.garage_settings SET maximum_advance_days=30 WHERE id=1");
+            assertEquals(monday.plusDays(30), generator.regenerate());
+            var initial = generator.availability(monday, "MOTORBIKE");
+            assertEquals(8, initial.size());
+            assertEquals("2031-01-06T08:00:00+07:00", initial.getFirst().startsAt());
+            assertEquals(2, initial.getFirst().remainingCapacity());
+            assertEquals(8, generator.availability(monday.plusDays(30), "MOTORBIKE").size());
+            assertEquals(monday.plusDays(30), generator.regenerate());
+            assertEquals(initial, generator.availability(monday, "MOTORBIKE"));
+            assertEquals("0", scalar(c, "SELECT MAX(version) FROM dbo.appointment_slots"));
+
+            long slot = Long.parseLong(initial.getFirst().id());
+            long customer = customer(c, "+84912345678");
+            long vehicle = vehicle(c, customer);
+            booking(c, "BK-SG-CONFIRMED", customer, vehicle, slot, "ONLINE", "CONFIRMED", null);
+            booking(c, "BK-SG-CANCELLED", customer, vehicle, slot, "ONLINE", "CANCELLED", null);
+            assertEquals(1, generator.availability(monday, "MOTORBIKE").getFirst().remainingCapacity());
+            var full = generator.updateSlot(slot, false, 1, 0);
+            assertEquals(7, generator.availability(monday, "MOTORBIKE").size());
+            var edit = generator.updateSlot(slot, true, 3, full.version());
+            assertEquals(3, edit.capacity());
+            assertTrue(edit.closed());
+            assertEquals(7, generator.availability(monday, "MOTORBIKE").size());
+
+            var holiday = generator.addClosedDate(monday, "Nghỉ kiểm thử", 0);
+            assertTrue(generator.availability(monday, "MOTORBIKE").isEmpty());
+            generator.removeClosedDate(Long.parseLong(holiday.id()), 1);
+            var restored = generator.adminSlots(monday, "MOTORBIKE").getFirst();
+            assertEquals(Long.toString(slot), restored.id());
+            assertTrue(restored.closed());
+            assertEquals(3, restored.capacityOverride());
+            assertEquals(1, restored.used());
+            assertEquals(7, generator.availability(monday, "MOTORBIKE").size());
+
+            var beforeChange = generator.scheduleSettings().settings();
+            generator.updateSettings(beforeChange,
+                    List.of(new Hours(1, LocalTime.of(20, 0), LocalTime.of(23, 0))), beforeChange.version());
+            var evening = generator.availability(monday, "MOTORBIKE");
+            assertEquals(3, evening.size());
+            assertEquals("2031-01-06T23:00:00+07:00", evening.getLast().endsAt());
+            assertEquals(restored.id(), generator.adminSlots(monday, "MOTORBIKE").getFirst().id());
+        });
+    }
+
+    @Test
+    void serviceCatalogPagesAndMapsDatabaseConflicts() throws Exception {
+        inTransaction(c -> {
+            var catalog = new ServiceCatalog(new JdbcTemplate(new SingleConnectionDataSource(c, true)));
+            var first = catalog.create("first", "Kiểm tra xe", null, "BOTH", 0);
+            catalog.create("second", "Thay dầu", null, "CAR", 120_000);
+            var page = catalog.adminList(1, 1);
+            assertEquals(2, page.totalElements());
+            assertEquals(2, page.totalPages());
+            assertEquals(first, page.items().getFirst());
+            assertEquals(2, catalog.publicList("CAR").size());
+            assertEquals(1, catalog.publicList("MOTORBIKE").size());
+            var updated = catalog.update(Long.parseLong(first.id()), first.name(), null, "BOTH", null, false, 0);
+            assertEquals(1, updated.version());
+            assertTrue(catalog.publicList("MOTORBIKE").isEmpty());
+            assertThrows(ServiceCatalog.NotFound.class,
+                    () -> catalog.update(-1, "Không tồn tại", null, "BOTH", 0L, true, 0));
+            assertThrows(ServiceCatalog.DuplicateCode.class,
+                    () -> catalog.create(" FIRST ", "Trùng mã", null, "BOTH", 0));
+        });
+    }
+
+    @Test
+    void v004EnforcesDefaultsAndBounds() throws Exception {
+        inTransaction(c -> {
+            long slot = slot(c);
+            assertEquals("0:none", scalar(c, """
+                    SELECT CONCAT(manual_closed,':',COALESCE(CONVERT(varchar(10),capacity_override),'none'))
+                    FROM dbo.appointment_slots WHERE id=?
+                    """, slot));
+            reject(c, Set.of(547), "UPDATE dbo.appointment_slots SET capacity_override=-1 WHERE id=?", slot);
+            reject(c, Set.of(547), "UPDATE dbo.appointment_slots SET capacity_override=101 WHERE id=?", slot);
+            long service = id(c, """
+                    INSERT dbo.services(code,name,vehicle_type,reference_price)
+                    OUTPUT INSERTED.id VALUES('IT-V004',N'Dịch vụ','CAR',0)
+                    """);
+            assertEquals("0", scalar(c, "SELECT version FROM dbo.services WHERE id=?", service));
+            reject(c, Set.of(547), "UPDATE dbo.services SET version=-1 WHERE id=?", service);
         });
     }
 

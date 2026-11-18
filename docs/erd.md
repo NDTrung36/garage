@@ -1,6 +1,6 @@
 # ERD và từ điển dữ liệu
 
-Database đích: **SQL Server 2022+**, migration bằng Flyway. Đã có V001–V003 cho 11 bảng nền phục vụ Guest Booking; 6 bảng sửa chữa/kho/hóa đơn/audit còn là thiết kế dự kiến. Ngày cập nhật: 17/11/2026.
+Database đích là **SQL Server 2022+**, migration bằng Flyway. V001–V004 quản lý 11 bảng nền. Sáu bảng sửa chữa, kho, hóa đơn và audit còn ở giai đoạn thiết kế. Cập nhật ngày 18/11/2026.
 
 Tham chiếu: [đặc tả](requirements.md), [kiến trúc và transaction](architecture.md).
 
@@ -58,6 +58,7 @@ erDiagram
         varchar vehicle_type
         decimal reference_price
         bit active
+        bigint version
         datetimeoffset created_at
         datetimeoffset updated_at
     }
@@ -96,6 +97,8 @@ erDiagram
         varchar vehicle_type
         int capacity
         bit closed
+        bit manual_closed
+        int capacity_override
         bigint version
         datetimeoffset created_at
         datetimeoffset updated_at
@@ -268,7 +271,7 @@ Các bảng lịch hoạt động tạo dữ liệu slot qua application service
 
 ### 3.3 `catalog`: services
 
-`services`: `id`, `code VARCHAR(40)`, `name NVARCHAR(150)`, `description NVARCHAR(1000) NULL`, `vehicle_type VARCHAR(10)`, `reference_price DECIMAL(18,0)`, `active BIT`, timestamps.
+`services`: `id`, `code VARCHAR(40)`, `name NVARCHAR(150)`, `description NVARCHAR(1000) NULL`, `vehicle_type VARCHAR(10)`, `reference_price DECIMAL(18,0)`, `active BIT`, `version BIGINT DEFAULT 0`, timestamps.
 
 - `code` unique, chuẩn hóa uppercase. `vehicle_type`: `CAR`, `MOTORBIKE`, `BOTH`.
 - Giá tham khảo không âm; `BOTH` được application kiểm tra khi đặt.
@@ -287,11 +290,12 @@ Các bảng lịch hoạt động tạo dữ liệu slot qua application service
 - Một ngày có nhiều khoảng mở cửa; unique `(day_of_week, opens_at)`, `opens_at < closes_at`.
 - Application chặn các khoảng trùng nhau và khoảng không chia hết cho `slot_minutes`. Không hỗ trợ ca qua nửa đêm.
 
-`calendar_exceptions`: `id`, `closed_date DATE`, `reason NVARCHAR(500)`, timestamps. Unique ngày; MVP chỉ hỗ trợ nghỉ trọn ngày. Có thể đóng từng slot qua `appointment_slots.closed`.
+`calendar_exceptions`: `id`, `closed_date DATE`, `reason NVARCHAR(500)`, timestamps. Unique theo ngày. MVP hỗ trợ nghỉ trọn ngày và đóng riêng từng slot qua `appointment_slots.manual_closed`.
 
-`appointment_slots`: `id`, `starts_at DATETIMEOFFSET(3)`, `ends_at DATETIMEOFFSET(3)`, `vehicle_type VARCHAR(10)`, `capacity INT`, `closed BIT`, `version`, timestamps.
+`appointment_slots`: `id`, `starts_at DATETIMEOFFSET(3)`, `ends_at DATETIMEOFFSET(3)`, `vehicle_type VARCHAR(10)`, `capacity INT`, `closed BIT`, `manual_closed BIT DEFAULT 0`, `capacity_override INT NULL`, `version`, timestamps.
 
 - Unique `(starts_at, vehicle_type)`, `capacity >= 0`, `starts_at < ends_at`.
+- `capacity_override` trong khoảng 0–100 nếu có giá trị. `closed` là trạng thái hiệu lực sau khi áp dụng mẫu giờ, ngày nghỉ và quyết định đóng riêng.
 - Không lưu `remaining_capacity` hoặc bộ đếm đã đặt; GET tính từ booking bằng SELECT, còn thao tác đặt/đổi kiểm tra lại dưới khóa slot.
 - Các trạng thái được tính giữ chỗ: `CONFIRMED`, `CHECKED_IN`, `COMPLETED`.
 - Slot không chồng lấn trong cùng loại xe; kiểm soát khi sinh/đổi cấu hình ở application.
@@ -433,6 +437,7 @@ Chỉ liên kết customer đã có sau khi xác minh quyền truy cập phù h�
 1. V001: users, customers, vehicles và services, kèm FK/unique/CHECK/index.
 2. V002: cấu hình lịch, slot, booking, booking_services và idempotency, kèm toàn bộ index nền.
 3. V003: cấu hình mặc định và 12 khoảng giờ làm; chưa seed slot hoặc dữ liệu demo.
-4. Giai đoạn tiếp theo: parts, repair_orders và repair_items; sau đó stock_movements, invoices và audit_logs.
+4. V004 thêm version cho dịch vụ và hai trường điều chỉnh riêng cho slot.
+5. Giai đoạn tiếp theo gồm parts, repair_orders, repair_items, stock_movements, invoices và audit_logs.
 
 Không chỉnh V001–V003 sau khi đã áp dụng; thay đổi bằng migration mới. Giữ Hibernate ddl-auto=none đến khi có entity rồi chuyển validate; không dùng update để thay Flyway. Schema này không lưu địa chỉ, giấy tờ tùy thân hoặc dữ liệu thanh toán ngân hàng của khách.
