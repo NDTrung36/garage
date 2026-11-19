@@ -15,6 +15,11 @@ import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.util.matcher.RequestMatcher;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import java.time.Clock;
+import java.util.Arrays;
+import java.util.Set;
+import org.springframework.core.env.Environment;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Configuration
 public class SecurityConfiguration {
@@ -23,7 +28,8 @@ public class SecurityConfiguration {
         var repository = new HttpSessionCsrfTokenRepository(); repository.setHeaderName("X-CSRF-TOKEN"); return repository;
     }
 
-    @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, SessionValidityService validity, HttpSessionCsrfTokenRepository csrfRepo) throws Exception {
+    @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, SessionValidityService validity, HttpSessionCsrfTokenRepository csrfRepo,
+            Clock clock, ObjectMapper objectMapper, Environment environment) throws Exception {
         var csrfHandler = new CsrfTokenRequestAttributeHandler();
         http.csrf(csrf -> csrf.csrfTokenRepository(csrfRepo).csrfTokenRequestHandler(csrfHandler)
                 .ignoringRequestMatchers(exact("POST", "/api/public/bookings"), exact("POST", "/api/public/lookups")))
@@ -43,6 +49,9 @@ public class SecurityConfiguration {
                 .anyRequest().denyAll())
             .addFilterAfter(new SessionValidityFilter(validity), AnonymousAuthenticationFilter.class);
         http.addFilterAfter(new LoginRateLimitFilter(), CsrfFilter.class);
+        Set<String> trusted = Arrays.stream(environment.getProperty("garage.public.trusted-proxies", "").split(","))
+                .map(String::trim).filter(value -> !value.isEmpty()).collect(java.util.stream.Collectors.toUnmodifiableSet());
+        http.addFilterAfter(new PublicBookingRateLimitFilter(trusted, clock, objectMapper), LoginRateLimitFilter.class);
         return http.build();
     }
 
@@ -51,6 +60,7 @@ public class SecurityConfiguration {
         response.getWriter().write("{\"code\":\"" + code + "\",\"message\":\"" + message + "\"}");
     }
     private static RequestMatcher exact(String method, String path) {
-        return request -> method.equals(request.getMethod()) && path.equals(request.getServletPath());
+        return request -> method.equals(request.getMethod())
+                && path.equals(request.getRequestURI().substring(request.getContextPath().length()));
     }
 }

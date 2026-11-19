@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError, getCsrf, type GarageUser } from '../api/client';
+import { BookingPage } from '../features/booking/BookingPage';
+import { LookupPage } from '../features/lookup/LookupPage';
 import './app.css';
 
 type UserRow = GarageUser & { active: boolean; authVersion: number };
@@ -27,11 +29,18 @@ export function App() {
   }
   async function logout() { await getCsrf(); await api('/auth/logout', { method: 'POST' }); setUser(null); }
   function navigate(next: string) { history.pushState({}, '', next); setPath(next); }
+  if (isPublicPath(path)) {
+    if (path === '/booking') return <BookingPage onNavigate={navigate} />;
+    if (path === '/lookup') return <LookupPage onNavigate={navigate} />;
+    return <main className="public-shell public-home"><nav className="public-nav"><b>GARAGE WORKSHOP</b><button className="outline" onClick={() => navigate('/lookup')}>Tra cứu lịch</button></nav><section className="home-hero"><p className="eyebrow">GARAGE SỬA Ô TÔ & XE MÁY</p><h1>Chăm xe dễ dàng,<br/>đặt lịch nhanh chóng.</h1><p className="muted">Chọn dịch vụ và khung giờ phù hợp. Không cần tạo tài khoản.</p><div><button onClick={() => navigate('/booking')}>Đặt lịch sửa xe</button><button className="outline" onClick={() => navigate('/lookup')}>Tra cứu lịch đã đặt</button></div></section><footer>Garage Workshop · Phục vụ ô tô và xe máy <button className="text-button" onClick={() => navigate('/staff')}>Nhân viên Garage</button></footer></main>;
+  }
   if (loading) return <main className="shell">Đang kiểm tra phiên đăng nhập…</main>;
   if(loadError) return <main className="shell"><p className="error">{loadError}</p><button onClick={()=>location.reload()}>Thử lại</button></main>;
   if (!user) return <main className="login-shell"><form className="card login" onSubmit={login}><p className="eyebrow">GARAGE • QUẢN TRỊ</p><h1>Đăng nhập</h1><p className="muted">Dành cho nhân viên và quản trị viên garage.</p><label>Tên đăng nhập<input name="username" autoComplete="username" required minLength={3} /></label><label>Mật khẩu<input name="password" type="password" autoComplete="current-password" required /></label>{error && <p className="error">{error}</p>}<button>Đăng nhập</button></form></main>;
   return <div className="layout"><aside><div className="brand">GARAGE<span>WORKSHOP</span></div><button className="nav" onClick={() => navigate('/staff')}>Tổng quan</button>{user.role === 'ADMIN' && <button className="nav" onClick={() => navigate('/admin/users')}>Tài khoản nhân viên</button>}<div className="profile"><b>{user.displayName}</b><small>{user.role === 'ADMIN' ? 'Quản trị viên' : 'Nhân viên'}</small><button className="outline" onClick={() => void logout()}>Đăng xuất</button></div></aside><main className="content"><header><span>Garage sửa xe</span><span>{user.displayName}</span></header>{path.startsWith('/admin/users') && user.role === 'ADMIN' ? <UsersPage /> : <section><p className="eyebrow">KHÔNG GIAN LÀM VIỆC</p><h1>Xin chào, {user.displayName}</h1><p className="muted">Đăng nhập và phân quyền nhân viên đã sẵn sàng. Các nghiệp vụ garage sẽ được bổ sung ở các feature tiếp theo.</p></section>}</main></div>;
 }
+
+function isPublicPath(path: string) { return path === '/' || path === '/booking' || path === '/lookup'; }
 
 function UsersPage() {
   const [page, setPage] = useState<UserPage | null>(null); const [pageIndex, setPageIndex] = useState(0); const [message, setMessage] = useState(''); const [resetUser,setResetUser]=useState<UserRow|null>(null);

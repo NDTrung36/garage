@@ -6,6 +6,8 @@ spring:
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
     driver-class-name: com.microsoft.sqlserver.jdbc.SQLServerDriver
+    hikari:
+      connection-init-sql: "SET ANSI_NULLS ON; SET ANSI_PADDING ON; SET ANSI_WARNINGS ON; SET ARITHABORT ON; SET CONCAT_NULL_YIELDS_NULL ON; SET QUOTED_IDENTIFIER ON; SET NUMERIC_ROUNDABORT OFF; SET XACT_ABORT OFF; SET LOCK_TIMEOUT 5000"
   jpa:
     open-in-view: false
     hibernate:
@@ -38,6 +40,8 @@ server:
 
 garage:
   timezone: Asia/Ho_Chi_Minh
+  public:
+    trusted-proxies: ${PUBLIC_TRUSTED_PROXIES:}
   identity:
     bootstrap:
       enabled: ${BOOTSTRAP_ADMIN_ENABLED:false}

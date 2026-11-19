@@ -7,9 +7,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import vn.garage.catalog.domain.BookingServiceLookup;
 
 @Service
-public class ServiceCatalog {
+public class ServiceCatalog implements BookingServiceCatalog {
     private static final String COLUMNS = "id, code, name, description, vehicle_type, reference_price, active, version";
     private static final RowMapper<ServiceView> ROW = (rs, index) -> new ServiceView(
             Long.toString(rs.getLong("id")), rs.getString("code"), rs.getString("name"),
@@ -17,15 +18,34 @@ public class ServiceCatalog {
             rs.getBoolean("active"), rs.getLong("version"));
 
     private final JdbcTemplate db;
+    private final BookingServiceLookup bookingServices;
 
-    public ServiceCatalog(JdbcTemplate db) {
+    public ServiceCatalog(JdbcTemplate db, BookingServiceLookup bookingServices) {
         this.db = db;
+        this.bookingServices = bookingServices;
     }
 
     public record ServiceView(String id, String code, String name, String description,
                               String vehicleType, long price, boolean active, long version) { }
 
     public record ServicePage(List<ServiceView> items, int page, int size, long totalElements, long totalPages) { }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<ServiceSnapshot> activeForBooking(List<Long> serviceIds, String vehicleType) {
+        if (serviceIds == null || serviceIds.isEmpty() || serviceIds.size() > 50
+                || serviceIds.stream().anyMatch(id -> id == null || id < 1)
+                || serviceIds.stream().distinct().count() != serviceIds.size()) {
+            throw new IllegalArgumentException("INVALID_SERVICE_IDS");
+        }
+        if (!"CAR".equals(vehicleType) && !"MOTORBIKE".equals(vehicleType)) {
+            throw new IllegalArgumentException("INVALID_VEHICLE_TYPE");
+        }
+        var selected = bookingServices.findActiveCompatible(serviceIds, vehicleType);
+        if (selected.size() != serviceIds.size()) throw new IllegalArgumentException("SERVICE_NOT_AVAILABLE");
+        return selected.stream().map(service -> new ServiceSnapshot(
+                service.id(), service.name(), service.referencePrice())).toList();
+    }
 
     public static final class NotFound extends RuntimeException { }
     public static final class DuplicateCode extends RuntimeException { }
