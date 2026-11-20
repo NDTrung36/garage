@@ -17,7 +17,6 @@ public class IdentityExceptionHandler {
         String code=e.getMessage()==null?"CONFLICT":e.getMessage(); int status=code.equals("FORBIDDEN")?403:code.equals("USERNAME_EXISTS")||code.startsWith("STALE_")||code.startsWith("LAST_")||code.startsWith("SELF_")?409:400;
         return ResponseEntity.status(status).body(Map.of("code",code,"message","Không thể hoàn tất thao tác."));
     }
-    @ExceptionHandler(org.springframework.dao.DataIntegrityViolationException.class) public ResponseEntity<?> duplicate() { return ResponseEntity.status(409).body(Map.of("code","USERNAME_EXISTS","message","Tên đăng nhập đã được sử dụng.")); }
     @ExceptionHandler(MethodArgumentNotValidException.class) public ResponseEntity<?> validation() { return ResponseEntity.badRequest().body(Map.of("code","VALIDATION_FAILED","message","Dữ liệu gửi lên không hợp lệ.")); }
     @ExceptionHandler(UserManagementService.UserNotFoundException.class) public ResponseEntity<?> notFound() { return ResponseEntity.status(404).body(Map.of("code","USER_NOT_FOUND","message","Không tìm thấy tài khoản.")); }
 }

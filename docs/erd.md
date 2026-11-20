@@ -1,6 +1,6 @@
 # ERD và từ điển dữ liệu
 
-Database đích là **SQL Server 2022+**, migration bằng Flyway. V001–V004 quản lý 11 bảng nền. Sáu bảng sửa chữa, kho, hóa đơn và audit còn ở giai đoạn thiết kế. Cập nhật ngày 18/11/2026.
+Database đích là **SQL Server 2022+**, migration bằng Flyway. V001–V004 quản lý 11 bảng identity/customer/catalog/schedule/booking; V005 thêm danh mục parts. Các bảng repair, ledger, invoice và audit tiếp tục theo migration versions riêng trong plan liên quan. Cập nhật ngày 18/11/2026.
 
 Tham chiếu: [đặc tả](requirements.md), [kiến trúc và transaction](architecture.md).
 
@@ -323,10 +323,11 @@ Loại xe khớp slot, ít nhất một dịch vụ và dịch vụ phù hợp x
 - `received_by`, `completed_by` là FK users; người tiếp nhận bắt buộc, người hoàn tất nullable khi chưa hoàn tất.
 - Số km không âm; completed phải có người và thời điểm hoàn tất.
 
-`repair_items`: `id`, `repair_order_id`, `item_type VARCHAR(10)`, `service_id BIGINT NULL`, `part_id BIGINT NULL`, `description NVARCHAR(200)`, `unit_snapshot NVARCHAR(30)`, `quantity DECIMAL(18,3)`, `unit_price DECIMAL(18,0)`, timestamps.
+`repair_items`: `id`, `repair_order_id`, `item_type VARCHAR(10)`, `service_id BIGINT NULL`, `part_id BIGINT NULL`, `description NVARCHAR(200)`, `unit_snapshot NVARCHAR(30)`, `quantity DECIMAL(18,3)`, `unit_price DECIMAL(18,0)`, `voided_at DATETIMEOFFSET(3) NULL`, `voided_by BIGINT NULL`, timestamps.
 
 - `LABOR`: part null, service tùy chọn, quantity > 0.
 - `PART`: part bắt buộc, service null, quantity >= 0. Quantity 0 được giữ để truy vết dòng đã hoàn hết vật tư; không tính phí dòng đó.
+- `voided_at` và `voided_by` chỉ được đặt cùng nhau trên LABOR của repair order `IN_PROGRESS`; `voided_by` là FK tới users. DELETE LABOR đánh dấu void trong transaction, không xóa dòng. Danh sách/tổng bỏ qua dòng đã void. Không void hoặc chỉnh/xóa PART có movement.
 - Dòng phụ tùng chỉ được tạo/tăng/giảm qua use case xuất/hoàn. Quantity là net issued, không phải số lượng dự kiến.
 - Filtered unique index `(repair_order_id, part_id) WHERE part_id IS NOT NULL` bảo đảm một dòng mỗi phụ tùng trên phiếu. Mọi ISSUE/RETURN dùng lại cùng repair_item_id; quantity về 0 vẫn giữ dòng.
 - Lần ISSUE đầu chụp unit_price; lần sau giữ nguyên. PATCH price chỉ trước hoàn tất, bắt buộc lý do/audit và đổi đơn giá cho toàn bộ quantity ròng, không lưu giá riêng mỗi ISSUE.
@@ -340,7 +341,9 @@ Loại xe khớp slot, ít nhất một dịch vụ và dịch vụ phù hợp x
 - Code unique; vehicle type `CAR`, `MOTORBIKE`, `BOTH`. Giá và tồn không âm.
 - Phụ tùng mới bắt đầu với tồn 0. Tồn đầu kỳ phải nhập qua ledger, không sửa trực tiếp cột tồn.
 
-`stock_movements`: `id`, `part_id`, `repair_item_id BIGINT NULL`, `original_issue_id BIGINT NULL`, `movement_type VARCHAR(15)`, `quantity_delta DECIMAL(18,3)`, `quantity_before DECIMAL(18,3)`, `quantity_after DECIMAL(18,3)`, `reason NVARCHAR(500)`, `created_by BIGINT`, `created_at`.
+`stock_movements`: `id`, `part_id`, `repair_item_id BIGINT NULL`, `original_issue_id BIGINT NULL`, `movement_type VARCHAR(15)`, `quantity_delta DECIMAL(18,3)`, `quantity_before DECIMAL(18,3)`, `quantity_after DECIMAL(18,3)`, `reason NVARCHAR(500)`, `note NVARCHAR(500) NULL`, `created_by BIGINT`, `created_at DATETIMEOFFSET(3)`.
+
+- `reason` luôn bắt buộc, sau trim dài 1–500 ký tự. `note` chỉ dành cho ghi chú tùy chọn của `RECEIPT`, tối đa 500 ký tự; chuỗi trống lưu `NULL`. Các loại movement khác bắt buộc `note IS NULL`.
 
 | Loại | Dấu quantity_delta | Liên kết |
 |---|---|---|
@@ -349,11 +352,11 @@ Loại xe khớp slot, ít nhất một dịch vụ và dịch vụ phù hợp x
 | `RETURN` | Dương | Có repair_item và original_issue trỏ về ISSUE gốc |
 | `ADJUSTMENT` | Khác 0 | Không có repair_item hoặc original_issue |
 
-- `quantity_after = quantity_before + quantity_delta`, before/after không âm.
+- `quantity_after = quantity_before + quantity_delta`, before/after không âm. Giá trị tồn và lượng net phải nằm trong miền `DECIMAL(18,3)`.
 - FK `original_issue_id` tự liên kết bảng; application kiểm tra cùng part/dòng sửa và tổng hoàn không vượt lần xuất gốc.
 - Nhiều ISSUE của cùng part/phiếu đều trỏ một dòng repair_items; RETURN trỏ đúng ISSUE gốc, không chỉ trỏ dòng tổng. Đơn giá thanh toán nằm ở repair_items, ledger này chỉ theo dõi số lượng.
-- Cập nhật parts, repair_items và thêm movement trong cùng transaction. Số lượng net issue phải khớp dòng PART.
-- Khóa part trước khi đọc tồn, ghi theo thứ tự part ID; issue/return trên cùng phiếu còn phải khóa phiếu để không chạy đua với hoàn tất sửa.
+- Cập nhật parts, repair_items và thêm movement trong cùng transaction. Số lượng net issue phải khớp dòng PART. `inventory.application` sở hữu hợp đồng ghi movement. `repair.application` sở hữu và khóa repair order, rồi mới gọi hợp đồng inventory trong cùng transaction.
+- Nhập/điều chỉnh khóa idempotency key rồi khóa part trước khi đọc tồn. Issue/return khóa key → repair order → part → movement gốc khi hoàn. Đọc `part_id` của ISSUE bằng truy vấn không khóa làm gợi ý, khóa part trước, sau đó khóa và xác minh lại ISSUE gốc. Khi tạo dòng PART lần đầu, khóa part trước khi INSERT dòng có FK `part_id`. Các đường sửa cùng phiếu không lấy khóa booking sau khi đã khóa repair order; hoàn tất giữ thứ tự booking → repair order để không khóa ngược.
 - Không dùng cascade hoặc chỉnh/xóa ledger để sửa sai. Giao dịch bù trừ phải có lý do.
 
 ### 3.8 `billing`: invoices
@@ -362,9 +365,10 @@ Loại xe khớp slot, ít nhất một dịch vụ và dịch vụ phù hợp x
 
 - `repair_order_id` unique; code unique, dạng `INV-` và 12 ký tự uppercase ngẫu nhiên.
 - `UNPAID`: thông tin paid để null. `PAID`: số tiền bằng total, phương thức/người/thời điểm không null.
-- Phương thức `CASH`, `BANK_TRANSFER`; `NO_CHARGE` chỉ dùng khi total = 0.
+- CHECK của V009 cho phép `CASH`, `BANK_TRANSFER` với tổng không âm và chỉ cho phép `NO_CHARGE` khi tổng bằng 0. Lớp nghiệp vụ chặt hơn: tổng 0 bắt buộc `NO_CHARGE`, tổng dương dùng `CASH` hoặc `BANK_TRANSFER`.
+- Index `IX_invoices_payment_issued` hỗ trợ lọc trạng thái và phân trang theo `issued_at DESC, id DESC`. Index lọc `IX_invoices_paid_by` chỉ chứa dòng có người thu.
 - Total không âm; chỉ được tạo cùng transaction chốt sửa. Không có invoice_items riêng trong MVP vì repair_items đã khóa sau hoàn tất.
-- Không sửa/xóa hóa đơn để thay đổi doanh thu; sửa nhầm trạng thái thu tiền phải qua use case Admin và audit.
+- Lệnh thu/sửa ghi nhận tăng `version` một lần và cập nhật `updated_at`. Sửa ghi nhận do Admin thực hiện, đưa bốn cột paid về null; snapshot trước/sau lưu trong `audit_logs`. Tổng và mã hóa đơn giữ nguyên.
 
 ### 3.9 Audit và idempotency
 
@@ -438,6 +442,6 @@ Chỉ liên kết customer đã có sau khi xác minh quyền truy cập phù h�
 2. V002: cấu hình lịch, slot, booking, booking_services và idempotency, kèm toàn bộ index nền.
 3. V003: cấu hình mặc định và 12 khoảng giờ làm; chưa seed slot hoặc dữ liệu demo.
 4. V004 thêm version cho dịch vụ và hai trường điều chỉnh riêng cho slot.
-5. Giai đoạn tiếp theo gồm parts, repair_orders, repair_items, stock_movements, invoices và audit_logs.
+5. V005 `parts` đã có trên branch feature kho, sau V004. Theo thứ tự FK, feature kho sở hữu migration `stock_movements` kế tiếp sau migration phiếu. Feature tiếp nhận/sửa chữa sở hữu migration `repair_orders`/`repair_items` trước đó và migrations `audit_logs`, `invoices` sau ledger. `idempotency_records` đã thuộc V002; feature tiếp nhận/sửa chữa sở hữu adapter dùng chung qua SC-03. Handoff hiện thống nhất dự kiến V006 repair, V007 stock movements, V008 audit và V009 invoices. Trước khi tạo/chạy migration, kiểm tra `flyway_schema_history` và toàn bộ scripts trên branch tích hợp; cấp version kế tiếp nếu trạng thái khác.
 
 Không chỉnh V001–V003 sau khi đã áp dụng; thay đổi bằng migration mới. Giữ Hibernate ddl-auto=none đến khi có entity rồi chuyển validate; không dùng update để thay Flyway. Schema này không lưu địa chỉ, giấy tờ tùy thân hoặc dữ liệu thanh toán ngân hàng của khách.

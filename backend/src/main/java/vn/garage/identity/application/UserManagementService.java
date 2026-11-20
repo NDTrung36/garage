@@ -5,6 +5,7 @@ import java.time.ZoneOffset;
 import java.util.Locale;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,7 +35,13 @@ public class UserManagementService {
         UserEntity actor=users.findById(actorId).orElseThrow();
         if (!actor.isActive() || !actor.getRole().equals("ADMIN")) throw new IllegalStateException("FORBIDDEN");
         if (users.existsByUsername(normalized)) throw new IllegalStateException("USERNAME_EXISTS");
-        UserView created=view(users.saveAndFlush(UserEntity.create(normalized, passwords.encode(password), displayName.trim(), role)));
+        UserView created;
+        try {
+            created = view(users.saveAndFlush(UserEntity.create(normalized, passwords.encode(password), displayName.trim(), role)));
+        } catch (DataIntegrityViolationException conflict) {
+            if (isUsernameConflict(conflict)) throw new IllegalStateException("USERNAME_EXISTS", conflict);
+            throw conflict;
+        }
         audit(actorId, Long.parseLong(created.id()), "USER_CREATED"); return created;
     }
 
@@ -69,6 +76,13 @@ public class UserManagementService {
     }
 
     private void lockUsers() { users.lockAndCountUsers(); }
+    private static boolean isUsernameConflict(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            String message = current.getMessage();
+            if (message != null && message.contains("UX_users_username")) return true;
+        }
+        return false;
+    }
     public static final class UserNotFoundException extends RuntimeException { }
     private void audit(long actorId,long targetId,String action) {
         log.info("identity_admin_action actorId={} targetId={} action={} outcome=SUCCESS traceId={}",actorId,targetId,action,

@@ -1,20 +1,49 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError, getCsrf, type GarageUser } from '../api/client';
 import { BookingPage } from '../features/booking/BookingPage';
+import { IntakePage } from '../features/booking/IntakePage';
+import { WalkInForm } from '../features/booking/WalkInForm';
 import { LookupPage } from '../features/lookup/LookupPage';
+import { PartsPage } from '../features/part/PartsPage';
+import { StockMovementsPage } from '../features/inventory/StockMovementsPage';
+import { RepairOrdersPage } from '../features/repair/RepairOrdersPage';
+import { RepairOrderDetailPage } from '../features/repair/RepairOrderDetailPage';
+import { InvoicesPage } from '../features/invoice/InvoicesPage';
+import { InvoicePage } from '../features/invoice/InvoicePage';
 import './app.css';
+import '../features/inventory/inventory.css';
 
 type UserRow = GarageUser & { active: boolean; authVersion: number };
 type UserPage = { items: UserRow[]; page: number; size: number; total: number };
 
 export function App() {
   const [user, setUser] = useState<GarageUser | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !isPublicPath(location.pathname));
   const [error, setError] = useState('');
   const [loadError, setLoadError] = useState('');
   const [path, setPath] = useState(location.pathname);
   useEffect(() => {
-    api<GarageUser>('/auth/me').then(setUser).catch((e:unknown) => { if(e instanceof ApiError && e.status===401) setUser(null); else setLoadError('Không kết nối được máy chủ. Vui lòng tải lại trang.'); }).finally(() => setLoading(false));
+    setLoadError('');
+    if (isPublicPath(path)) {
+      setUser(null);
+      setLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    const { signal } = controller;
+    setLoading(true);
+    api<GarageUser>('/auth/me', { signal })
+      .then((current) => { if (!signal.aborted) setUser(current); })
+      .catch((cause: unknown) => {
+        if (signal.aborted) return;
+        if (cause instanceof ApiError && cause.status === 401) setUser(null);
+        else setLoadError('Không kết nối được máy chủ. Vui lòng tải lại trang.');
+      })
+      .finally(() => { if (!signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [path]);
+
+  useEffect(() => {
     const onPop = () => setPath(location.pathname);
     const onUnauthorized = () => setUser(null);
     addEventListener('popstate', onPop);
@@ -37,7 +66,17 @@ export function App() {
   if (loading) return <main className="shell">Đang kiểm tra phiên đăng nhập…</main>;
   if(loadError) return <main className="shell"><p className="error">{loadError}</p><button onClick={()=>location.reload()}>Thử lại</button></main>;
   if (!user) return <main className="login-shell"><form className="card login" onSubmit={login}><p className="eyebrow">GARAGE • QUẢN TRỊ</p><h1>Đăng nhập</h1><p className="muted">Dành cho nhân viên và quản trị viên garage.</p><label>Tên đăng nhập<input name="username" autoComplete="username" required minLength={3} /></label><label>Mật khẩu<input name="password" type="password" autoComplete="current-password" required /></label>{error && <p className="error">{error}</p>}<button>Đăng nhập</button></form></main>;
-  return <div className="layout"><aside><div className="brand">GARAGE<span>WORKSHOP</span></div><button className="nav" onClick={() => navigate('/staff')}>Tổng quan</button>{user.role === 'ADMIN' && <button className="nav" onClick={() => navigate('/admin/users')}>Tài khoản nhân viên</button>}<div className="profile"><b>{user.displayName}</b><small>{user.role === 'ADMIN' ? 'Quản trị viên' : 'Nhân viên'}</small><button className="outline" onClick={() => void logout()}>Đăng xuất</button></div></aside><main className="content"><header><span>Garage sửa xe</span><span>{user.displayName}</span></header>{path.startsWith('/admin/users') && user.role === 'ADMIN' ? <UsersPage /> : <section><p className="eyebrow">KHÔNG GIAN LÀM VIỆC</p><h1>Xin chào, {user.displayName}</h1><p className="muted">Đăng nhập và phân quyền nhân viên đã sẵn sàng. Các nghiệp vụ garage sẽ được bổ sung ở các feature tiếp theo.</p></section>}</main></div>;
+  const adminPartsPath = path === '/admin/parts';
+  const staffPartsPath = path === '/staff/parts';
+  const stockPath = path === '/staff/stock-movements';
+  const usersPath = path.startsWith('/admin/users');
+  const repairsPath = path === '/staff/repair-orders';
+  const invoicesPath = path === '/staff/invoices';
+  const bookingsPath = path === '/staff/bookings';
+  const walkInsPath = path === '/staff/walk-ins';
+  const repairId = path.match(/^\/staff\/repair-orders\/([1-9]\d*)$/)?.[1];
+  const invoiceId = path.match(/^\/staff\/invoices\/([1-9]\d*)$/)?.[1];
+  return <div className="layout"><aside><div className="brand">GARAGE<span>WORKSHOP</span></div><button className="nav" aria-current={path === '/staff' ? 'page' : undefined} onClick={() => navigate('/staff')}>Tổng quan</button><button className="nav" aria-current={bookingsPath ? 'page' : undefined} onClick={() => navigate('/staff/bookings')}>Lịch tiếp nhận xe</button><button className="nav" aria-current={walkInsPath ? 'page' : undefined} onClick={() => navigate('/staff/walk-ins')}>Tiếp nhận tại gara</button><button className="nav" aria-current={staffPartsPath || adminPartsPath ? 'page' : undefined} onClick={() => navigate(user.role === 'ADMIN' ? '/admin/parts' : '/staff/parts')}>Phụ tùng & tồn kho</button><button className="nav" aria-current={stockPath ? 'page' : undefined} onClick={() => navigate('/staff/stock-movements')}>Lịch sử kho</button><button className="nav" aria-current={repairsPath || Boolean(repairId) ? 'page' : undefined} onClick={() => navigate('/staff/repair-orders')}>Phiếu sửa chữa</button><button className="nav" aria-current={invoicesPath || Boolean(invoiceId) ? 'page' : undefined} onClick={() => navigate('/staff/invoices')}>Hóa đơn</button>{user.role === 'ADMIN' && <button className="nav" aria-current={usersPath ? 'page' : undefined} onClick={() => navigate('/admin/users')}>Tài khoản nhân viên</button>}<div className="profile"><b>{user.displayName}</b><small>{user.role === 'ADMIN' ? 'Quản trị viên' : 'Nhân viên'}</small><button className="outline" onClick={() => void logout()}>Đăng xuất</button></div></aside><main className="content"><header><span>Garage sửa xe</span><span>{user.displayName}</span></header>{usersPath && user.role === 'ADMIN' ? <UsersPage /> : adminPartsPath && user.role === 'ADMIN' ? <PartsPage admin /> : (adminPartsPath && user.role !== 'ADMIN') ? <section className="inventory-access-denied"><p className="eyebrow">KHÔNG ĐỦ QUYỀN</p><h1>Trang này dành cho quản trị viên</h1><p className="muted">Bạn có thể xem danh mục và tồn kho tại trang phụ tùng.</p><button onClick={() => navigate('/staff/parts')}>Mở phụ tùng và tồn kho</button></section> : staffPartsPath ? <PartsPage admin={false} /> : stockPath ? <StockMovementsPage user={user} /> : bookingsPath ? <IntakePage onNavigate={navigate} /> : walkInsPath ? <WalkInForm key={user.id} userId={user.id} onNavigate={navigate} /> : repairsPath ? <RepairOrdersPage onNavigate={navigate} /> : repairId ? <RepairOrderDetailPage key={`${user.id}:${repairId}`} id={repairId} user={user} onNavigate={navigate} /> : invoicesPath ? <InvoicesPage onNavigate={navigate} /> : invoiceId ? <InvoicePage key={`${user.id}:${invoiceId}`} id={invoiceId} user={user} onNavigate={navigate} /> : <section><p className="eyebrow">KHÔNG GIAN LÀM VIỆC</p><h1>Xin chào, {user.displayName}</h1><p className="muted">Chọn Lịch tiếp nhận xe để xem lịch hẹn hoặc Tiếp nhận tại gara để tạo phiếu cho khách đến trực tiếp.</p></section>}</main></div>;
 }
 
 function isPublicPath(path: string) { return path === '/' || path === '/booking' || path === '/lookup'; }

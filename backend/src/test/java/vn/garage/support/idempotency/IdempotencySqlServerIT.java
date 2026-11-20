@@ -6,7 +6,6 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
-import java.sql.Types;
 import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -171,7 +170,7 @@ class IdempotencySqlServerIT {
         long partId = db.queryForObject("""
                 INSERT dbo.parts(code,name,unit,vehicle_type,reference_price)
                 OUTPUT INSERTED.id VALUES(?,N'IT part',N'cái','BOTH',100)
-                """, Long.class, "IT-AUDIT-" + UUID.randomUUID());
+                """, Long.class, "AUDIT-" + UUID.randomUUID().toString().replace("-", ""));
         var writes = new SqlServerWriteTransactions(new DataSourceTransactionManager(source), db);
         var audit = new JdbcAuditWriter(db, new ObjectMapper());
         try {
@@ -282,23 +281,20 @@ class IdempotencySqlServerIT {
 
     @Test
     void compositePrimaryKeyLookupPlanUsesIndexSeek() throws Exception {
-        String scope = IdempotencyExecutor.scope(scope(), 41L);
-        String key = key();
         try (Connection c = connect(); Statement s = c.createStatement()) {
             s.execute("SET SHOWPLAN_XML ON");
-            try (PreparedStatement ps = c.prepareStatement("""
+            // SHOWPLAN compiles this SQL batch without executing it. Avoid the JDBC
+            // sp_prepexec RPC, which does not return its normal prepared result here.
+            try (ResultSet rs = s.executeQuery("""
                     SELECT request_hash,http_status,response_json,expires_at
                     FROM dbo.idempotency_records WITH (UPDLOCK,HOLDLOCK,INDEX(PK_idempotency_records))
-                    WHERE scope=? AND request_key=?
+                    WHERE scope=CAST('sc14:41' AS VARCHAR(100))
+                      AND request_key=CAST('sc14-plan' AS VARCHAR(100))
                     """)) {
-                ps.setObject(1, scope, Types.VARCHAR);
-                ps.setObject(2, key, Types.VARCHAR);
-                try (ResultSet rs = ps.executeQuery()) {
                 assertTrue(rs.next());
                 String plan = rs.getString(1);
                 assertTrue(plan.contains("Index Seek"), plan);
                 assertTrue(plan.contains("PK_idempotency_records"), plan);
-                }
             } finally {
                 s.execute("SET SHOWPLAN_XML OFF");
             }

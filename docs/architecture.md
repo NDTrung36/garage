@@ -1,6 +1,6 @@
 # Kiến trúc hệ thống Garage MVP
 
-Ngày cập nhật: 17/11/2026. Tài liệu mô tả kiến trúc đích; source hiện có scaffold Maven/Vite, migration nền 11 bảng và identity MVP. Các use case garage còn lại chưa triển khai.
+Ngày cập nhật: 18/11/2026. Source đã có identity, catalog service, quản lý lịch/slot; guest booking và lookup public đang được triển khai. Các use case repair, inventory và billing còn lại theo các plan riêng.
 
 Tham chiếu: [đặc tả nghiệp vụ](requirements.md), [ERD SQL Server](erd.md).
 
@@ -84,7 +84,7 @@ sequenceDiagram
     Guest->>API: POST booking + Idempotency-Key
     API->>App: Validated command
     App->>DB: BEGIN; khóa idempotency key
-    App->>DB: Khóa slot; kiểm tra giờ/trùng biển số/capacity
+    App->>DB: Đọc khóa shared garage_settings, khóa slot; kiểm tra giờ/trùng biển số/capacity
     App->>Customer: Tìm hoặc tạo customer và vehicle
     Customer->>DB: Đọc/ghi trong cùng transaction
     App->>DB: Kiểm tra dịch vụ; lưu booking + snapshots
@@ -96,6 +96,7 @@ Transaction boundary nằm ở application service ngoài cùng, các service n�
 
 Các quy tắc cạnh tranh trên SQL Server:
 
+- Booking giữ shared range lock trên hàng garage_settings trước `UPDLOCK, HOLDLOCK` của slot. Các booking độc lập vẫn chạy đồng thời; lock shared ngăn schedule writer đổi cấu hình giữa lúc kiểm tra. Schedule writer lấy update lock settings trước slot theo thứ tự chung.
 - Khóa slot cụ thể bằng truy vấn `WITH (UPDLOCK, HOLDLOCK)` trong transaction trước khi đếm booking; mọi đường tạo, đổi và hủy booking phải tuân thủ cùng cơ chế.
 - Tìm/tạo customer bằng điều kiện equality trên unique index `customers.phone_normalized`, dùng `WITH (UPDLOCK, HOLDLOCK)` trước INSERT. Khóa được giữ đến hết transaction; không dựa vào thao tác “find rồi save” không khóa.
 - Dưới khóa slot, so khớp `plate_normalized_snapshot` trong các booking `CONFIRMED`, `CHECKED_IN`, `COMPLETED`, trước khi tạo hồ sơ mới hoặc kiểm tra capacity. Filtered unique index trong [ERD](erd.md) bảo vệ thêm ở DB; xung đột trả `409 BOOKING_CONFLICT` và không tiết lộ booking cũ. Đổi lịch cũng kiểm tra trùng ở slot đích.
@@ -130,17 +131,18 @@ sequenceDiagram
     participant DB as SQL Server
     Staff->>Repair: Xác nhận sử dụng phụ tùng + request key
     Repair->>DB: BEGIN; khóa key và phiếu sửa
-    Repair->>DB: Kiểm tra IN_PROGRESS; tìm/tạo dòng PART theo part_id
-    Repair->>Stock: Xuất part cho repair item
-    Stock->>DB: Khóa part; kiểm tra tồn; cập nhật stock
+    Repair->>DB: Kiểm tra IN_PROGRESS; khóa part
+    Repair->>DB: Tìm/tạo dòng PART theo part_id
+    Repair->>Stock: Ghi ISSUE cho repair item trong transaction hiện tại
+    Stock->>DB: Kiểm tra tồn dưới khóa part; cập nhật stock
     Stock->>DB: INSERT stock_movement ISSUE
     Repair->>DB: Cập nhật net quantity; audit; COMMIT
     Repair-->>Staff: Tồn và chi phí mới
 ```
 
-Khóa theo thứ tự: idempotency → phiếu sửa → các part theo ID tăng dần → movement gốc khi hoàn. Mọi thao tác xuất/hoàn phải khóa phiếu trước để không chạy cùng lúc với hoàn tất sửa. Giao dịch nhập/điều chỉnh độc lập chỉ cần khóa part.
+Khóa theo thứ tự: idempotency → phiếu sửa → các part theo ID tăng dần → movement gốc khi hoàn. Mọi thao tác xuất/hoàn phải khóa phiếu trước để không chạy cùng lúc với hoàn tất sửa. Trước khi tìm/tạo dòng PART có FK tới `parts`, repair khóa part qua `inventory.application`, rồi mới INSERT hoặc cập nhật dòng PART. Inventory ghi ledger và cập nhật tồn trong transaction hiện tại. Giao dịch nhập/điều chỉnh độc lập khóa idempotency key rồi khóa part.
 
-Khi hoàn, kiểm tra lượng ISSUE còn được hoàn dưới khóa part, ghi movement RETURN và giảm quantity của dòng PART. Không sửa ledger gốc và không nhận con số tồn cuối từ frontend.
+Khi hoàn, đọc `part_id` từ ISSUE gốc như thông tin gợi ý không khóa, khóa part trước, rồi khóa và xác minh lại movement gốc cùng dòng/phiếu. Kiểm tra lượng ISSUE còn được hoàn dưới các khóa đó, ghi movement RETURN và giảm quantity của dòng PART. Không sửa ledger gốc và không nhận con số tồn cuối từ frontend.
 
 Mỗi `(repair_order_id, part_id)` có tối đa một dòng PART, được bảo vệ bằng filtered unique index. ISSUE lần sau dùng lại repair_item_id, giữ unit_price đã chụp ở lần đầu và cộng quantity. RETURN giảm quantity theo ISSUE gốc; quantity về 0 vẫn giữ dòng. PATCH price chỉ khi IN_PROGRESS, có reason/audit và áp dụng cho toàn bộ quantity ròng của dòng, không tạo bảng giá theo lần xuất.
 
@@ -152,13 +154,14 @@ Khóa hàng part là cần thiết vì tồn của một phụ tùng được d�
 2. Tính từng dòng bằng BigDecimal, `setScale(0, RoundingMode.HALF_UP)`, rồi cộng tổng; không lấy tổng do client gửi. Nếu đối chiếu SQL, dùng DECIMAL và `ROUND(quantity * unit_price, 0)`.
 3. Khóa dữ liệu liên quan và cập nhật phiếu/booking `COMPLETED`.
 4. Gọi billing tạo hóa đơn `UNPAID`, lưu tổng cố định; commit toàn bộ hoặc rollback toàn bộ.
-5. Thu tiền là request riêng: khóa invoice, kiểm tra `UNPAID`, lưu thông tin thu đủ và audit trong một transaction.
+5. Lệnh thu tiền và sửa ghi nhận khóa theo thứ tự idempotency → invoice. Khóa invoice theo PK với `UPDLOCK,HOLDLOCK`, kiểm version trước trạng thái và quy tắc phương thức. Cập nhật các trường paid, `updated_at` và tăng version một lần. Thời điểm ghi theo UTC đến mili giây.
+6. Cùng transaction ghi audit `entity_type=INVOICE` với action `INVOICE_MARK_PAID` hoặc `INVOICE_RESET_PAYMENT` và lưu kết quả idempotency. Snapshot trước/sau gồm ID, tổng, trạng thái, các trường paid và version. Actor và lý do sửa lưu ở cột audit.
 
 Hoàn tất đi theo thứ tự booking → repair order → invoice, không khóa slot vì trạng thái CHECKED_IN và COMPLETED đều tính giữ lượt. Check-in online đi theo thứ tự slot → booking → tạo/đọc repair order ở IN_PROGRESS; walk-in tạo booking CHECKED_IN và repair order IN_PROGRESS trong cùng transaction. Nếu check-in lặp gặp phiếu đã hoàn tất thì trả trạng thái hiện tại, không chuyển lùi.
 
 Không đảo thành repair order → booking khi hoàn tất: request check-in lặp có thể đang giữ booking rồi chờ đọc repair order, tạo vòng chờ với request hoàn tất. Các lệnh LABOR/PART chỉ cần khóa repair order và không lấy khóa booking sau đó. Chỉ sửa LABOR, giá PART và xuất/hoàn ở IN_PROGRESS. Không có use case start; không gọi hoàn tất trên phiếu chưa được tạo/commit.
 
-Unique booking_id của repair_orders và unique repair_order_id của invoices ngăn tạo lặp. Request hoàn tất lặp trả lại hóa đơn đã có; không tạo hóa đơn mới hoặc trừ kho lần nữa.
+Unique booking_id của repair_orders và unique repair_order_id của invoices ngăn tạo lặp. Request hoàn tất lặp trả summary hóa đơn hiện tại. Chi tiết phiếu đã hoàn tất lấy tổng và trạng thái thu từ hóa đơn. Phiếu hoàn tất thiếu hóa đơn hoặc hóa đơn trỏ tới phiếu chưa hoàn tất là lỗi bất nhất dữ liệu.
 
 ### 3.5 Idempotency
 
@@ -170,6 +173,9 @@ Unique booking_id của repair_orders và unique repair_order_id của invoices 
 - Kết quả và dữ liệu nghiệp vụ commit cùng nhau. Request lỗi rollback không giữ một kết quả thành công giả.
 - Hoàn tất/check-in ngoài idempotency còn được bảo vệ bằng trạng thái và unique constraint.
 - Giới hạn chờ khóa 5 giây; hết hạn trả `503 REQUEST_IN_PROGRESS` với Retry-After và yêu cầu retry cùng key. Chỉ retry toàn transaction cho deadlock như mục 3.1, không biến timeout thành thao tác mới.
+- Billing dùng `billing.invoice.mark-paid:actor:{id}` và `billing.invoice.reset-payment:actor:{id}`. Payload chuẩn hóa gồm ID hóa đơn, version và phương thức hoặc lý do đã trim. Replay trả snapshot của lần ghi gốc. UI giữ UUID và payload trong `sessionStorage`, chặn gửi kép, tuân thủ `Retry-After` và GET lại sau thành công, replay hoặc xung đột. Khi mở lại chi tiết, UI tải bản mới trước khi cho ghi.
+
+`idempotency_records` và `audit_logs` dùng chung toàn ứng dụng. Feature tiếp nhận/sửa chữa (`SC-03`) sở hữu adapter và executor idempotency/audit để booking, kho và thanh toán gọi chung. Feature kho không tạo bảng idempotency hay adapter dùng riêng. Hợp đồng migration ở [ERD §6](erd.md#6-migration-nền-và-phần-tiếp-theo) ghi owner từng version.
 
 ## 4. Hợp đồng API dự kiến
 
@@ -181,8 +187,8 @@ Prefix `/api`. JSON UTF-8. Tên JSON dùng camelCase; tên cột DB dùng snake_
 |---|---|---|
 | `GET /public/services` | vehicleType | Dịch vụ đang hoạt động, giá tham khảo |
 | `GET /public/slots` | date `YYYY-MM-DD`, vehicleType | Slot, giờ và remainingCapacity |
-| `POST /public/bookings` | Liên hệ, xe, serviceIds, slotId; request key | Mã booking, trạng thái, thời gian, dịch vụ |
-| `POST /public/lookups` | Đúng một trong phone/bookingCode; page, size | Page DTO public; tra mã trả tối đa một phần tử |
+| `POST /public/bookings` | `contact`, `vehicle`, `serviceIds`, `slotId`, `note`; `Idempotency-Key` UUID | `201`: bookingCode, status, thời gian, loại xe, dịch vụ và giá tham khảo |
+| `POST /public/lookups` | Đúng một trong `phone`/`bookingCode`; `page`, `size` | Page DTO public allowlist; tra mã tối đa một phần tử |
 
 Ví dụ tạo booking:
 
@@ -197,6 +203,8 @@ Ví dụ tạo booking:
 ```
 
 Response `201` không trả customer ID, vehicle ID hoặc hồ sơ khách đã có. Tra cứu phone/code dùng POST để không đưa thông tin vào URL. Cả hai trường cùng có hoặc cùng thiếu trả `400`.
+
+Số điện thoại được xác thực là di động Việt Nam và chuẩn hóa E.164. Customer được tìm/tạo qua unique phone, vehicle qua customer và plate đã chuẩn hóa; không ghi đè hồ sơ cũ. Booking ghi snapshot, trạng thái `CONFIRMED`, `created_by=NULL`, mã dạng `BK-` + 12 ký tự ngẫu nhiên. Cùng key/payload trong 24 giờ trả response đã commit; khác payload trả `409 IDEMPOTENCY_CONFLICT`. Lookup theo phone có phân trang; code tra cứu chính xác; biển số được che trên server và không trả liên hệ/ghi chú/internal ID. Public client không gửi cookie session. Booking giới hạn 10 request/IP/10 phút, lookup 30/phút; bucket tổng tối đa 4096/backend instance.
 
 Lookup response là projection có allowlist, không serialize entity rồi che trên UI. Response có `Cache-Control: no-store`; không log request body. Không có kết quả trả `200` với danh sách rỗng.
 
@@ -233,6 +241,19 @@ Chỉ public services/slots/bookings/lookups và cơ chế lấy CSRF/login cầ
 Các path rút gọn trong một ô giữ nguyên prefix của path đầy đủ cùng hàng. Không hỗ trợ DELETE booking, invoice, movement hoặc danh mục có lịch sử. Thao tác danh mục dùng active=false khi ngừng sử dụng.
 
 Các lệnh PATCH/chuyển trạng thái gửi version hiện tại của đối tượng khi có optimistic locking; xung đột trả `409 STALE_VERSION`. UI tải lại trước khi cho sửa tiếp.
+
+Hóa đơn nội bộ đã triển khai với hợp đồng sau. Hai GET và hai POST thành công trả `Cache-Control: no-store`.
+
+| Endpoint (prefix `/api`) | Quyền và dữ liệu |
+|---|---|
+| `GET /staff/invoices` | Staff/Admin. Query `paymentStatus=UNPAID\|PAID` tùy chọn, `page` từ 0, `size` mặc định 20 và tối đa 100. Sắp `issuedAt DESC, id DESC`. Trả `items,page,size,totalElements,totalPages`, mỗi item có `id,code,repairOrderId,issuedAt,totalAmount,paymentStatus`. |
+| `GET /staff/invoices/{id}` | Staff/Admin. Thêm `version,paidAmount,paymentMethod,paidBy,paidByDisplayName,paidAt,items`. Dòng gồm `id,type,description,unit,quantity,unitPrice,lineTotal`. LABOR hợp lệ trước PART số lượng dương, trong mỗi nhóm theo ID. |
+| `POST /staff/invoices/{id}/mark-paid` | Staff/Admin. Nhận `expectedVersion,paymentMethod`. Tổng dương dùng `CASH` hoặc `BANK_TRANSFER`, tổng 0 dùng `NO_CHARGE`. |
+| `POST /admin/invoices/{id}/reset-payment` | Admin. Nhận `expectedVersion,reason`. Chuyển `PAID` về `UNPAID` và đặt các trường paid về null. |
+
+Hai POST yêu cầu session, CSRF và `Idempotency-Key`. Actor lấy từ phiên. Chỉ nhận các field được liệt kê. Trả `200` với `id,paymentStatus,paidAmount,paymentMethod,paidBy,paidAt,version`. Hóa đơn không tồn tại trả `404 INVOICE_NOT_FOUND`. Xung đột version, trạng thái hoặc nội dung cùng key trả `409`. Chờ khóa quá hạn trả `503 REQUEST_IN_PROGRESS` với `Retry-After: 1`. Lỗi bất nhất trả `500 INVOICE_DATA_INCONSISTENT`.
+
+Hợp đồng AC-14 dành cho Guest Booking là projection chỉ đọc của booking đã khớp tra cứu, theo quan hệ booking → repair order → invoice. Chỉ bổ sung `totalAmount` và `paymentStatus` khi có hóa đơn, giữ tổng 0 hợp lệ. Giữ so khớp mã chính xác, phân trang SĐT, che biển số và allowlist hiện có. DTO public không mang ID/mã hóa đơn, phương thức, người thu, thời điểm thu, lý do, audit hoặc ledger. Projection này chưa được nối vào API public.
 
 ### 4.4 Lỗi và phân trang
 
@@ -290,10 +311,10 @@ Màn hình phiếu sửa phân biệt ghi công việc, xác nhận xuất phụ
 
 ### Migration
 
-- Script đặt tập trung tại `backend/src/main/resources/db/migration`, theo version tăng toàn backend.
+- Script đặt tập trung tại `backend/src/main/resources/db/migration`, theo version tăng toàn backend. Mỗi migration có một feature owner theo [ERD §6](erd.md#6-migration-nền-và-phần-tiếp-theo); thứ tự FK không thay đổi owner.
 - Flyway dùng driver Microsoft JDBC và module `org.flywaydb:flyway-sqlserver` được quản lý version bởi Spring Boot 3.5.16.
-- Đã có V001–V003 cho 11 bảng nền, bao gồm idempotency cùng booking; seed chỉ cấu hình và giờ làm, chưa tạo slot/dữ liệu demo.
-- Hiện ddl-auto=none vì chưa có entity; chuyển validate khi triển khai mapping. Migration không thay đổi cấu hình TCP/xác thực hoặc tạo database/login.
+- V001–V003 tạo 11 bảng nền, V002 đã có `idempotency_records`; V004 thêm version dịch vụ và override lịch. Worktree hiện có V005 `parts` và V007 `stock_movements`; V006 dành cho repair orders/items, V008 audit và V009 invoices theo owner trong [ERD §6](erd.md#6-migration-nền-và-phần-tiếp-theo). Không tạo lại bảng idempotency. Kiểm tra scripts và Flyway history trước khi chạy migration.
+- `application.yml` hiện đặt `ddl-auto=validate`; giữ Flyway là nguồn thay đổi schema. Migration không thay đổi cấu hình TCP/xác thực hoặc tạo database/login.
 - Local có thể dùng cùng tài khoản đủ quyền migration; production chạy migration bằng credentials riêng trước khi khởi động ứng dụng với quyền CRUD hạn chế.
 - Không sửa migration đã áp dụng; backup trước migration có nguy cơ thay đổi dữ liệu. Rollback application chỉ thực hiện khi tương thích schema hiện tại, còn schema sửa bằng migration mới.
 

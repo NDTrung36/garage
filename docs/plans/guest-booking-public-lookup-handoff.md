@@ -50,6 +50,14 @@ Kịch bản SQL Server của booking nằm trong `FoundationMigrationIT`.
 
 Đã chuyển checkout sang branch `codex/guest-booking-public-lookup` từ commit nền `b61dd5d`. Các file inventory/repair khác đang modified hoặc untracked được giữ nguyên và không stage.
 
+## Projection thanh toán · AC-14
+
+Hợp đồng bàn giao ngày 19/11/2026. Chưa tích hợp vào `POST /api/public/lookups`.
+
+- Giữ tra theo số điện thoại đã chuẩn hóa và phân trang theo booking. Tra mã chính xác chỉ trả tối đa một booking. Giữ che biển số và allowlist public hiện có.
+- Sau khi xác định booking trong trang trả về, đọc theo quan hệ booking → repair order → invoice. Chỉ khi có hóa đơn mới bổ sung `totalAmount` (số nguyên VND, gồm tổng 0) và `paymentStatus` (`UNPAID` hoặc `PAID`). Booking chưa có hóa đơn giữ response hiện tại và không suy diễn là chưa thanh toán.
+- Projection chỉ đọc. DTO không có ID/mã hóa đơn, người thu, phương thức, thời điểm thu, lý do, ledger hoặc audit. Khi tích hợp, kiểm thử tra mã, phân trang theo SĐT, tổng 0, trước/sau reset và allowlist response. Xem [hợp đồng kiến trúc](../architecture.md#43-staff-và-admin).
+
 ## Quy tắc tiếp tục
 
 Đọc [AGENTS.md](../../AGENTS.md), [garage-schedule-booking](../../skills/garage-schedule-booking/SKILL.md), [garage-sqlserver-migration](../../skills/garage-sqlserver-migration/SKILL.md) và [garage-feature-acceptance](../../skills/garage-feature-acceptance/SKILL.md). Chạy browser acceptance khi JDBC local kết nối được SQL Server; sau đó cập nhật trạng thái thành `COMPLETE`. Không xem build là bằng chứng browser acceptance.

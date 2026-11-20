@@ -59,22 +59,32 @@ Compile/package không cần database. Integration test migration chạy riêng 
 
 Migration nằm trong `src/main/resources/db/migration`; xem [quy ước Flyway](src/main/resources/db/migration/README.md).
 
-Đã có 3 migration, 11 bảng nền và seed cấu hình garage. Chưa có user seed, entity, public endpoint hoặc SecurityFilterChain riêng. Giữ ddl-auto=none; chỉ đổi sang validate khi có entity để Hibernate kiểm chứng mapping.
+Migrations V001–V003 tạo 11 bảng nền, V004 thêm version dịch vụ và override lịch, V005 tạo danh mục phụ tùng rỗng, V006 tạo phiếu và chi tiết, V007 tạo ledger phụ tùng, V008 tạo audit, V009 tạo hóa đơn. V006 không backfill booking `CONFIRMED`. Kiểm tra [README migration](src/main/resources/db/migration/README.md) và Flyway history thực tế trước khi triển khai version tiếp theo. `application.yml` hiện dùng `ddl-auto=validate`; Flyway vẫn là nguồn thay đổi schema.
+
+Public guest booking/lookup dùng JDBC trên schema nền hiện tại; Customer và Vehicle được tìm/tạo trong transaction, khách không có tài khoản. Rate limit public mặc định dùng `getRemoteAddr()`. Khi đặt sau reverse proxy, `PUBLIC_TRUSTED_PROXIES` phải liệt kê chính xác IP proxy; proxy phải ghi đè header `X-Real-IP` bằng địa chỉ client và loại bỏ header do client gửi. Không tin header từ proxy chưa cấu hình. Mỗi backend instance giữ tối đa 4096 bucket.
+
+## Kết nối ghi, idempotency và audit
+
+Hikari thiết lập các ANSI/ARITHABORT option theo V002 và `LOCK_TIMEOUT 5000` khi mở connection. `SqlServerWriteTransactions` chạy lệnh ghi trong transaction ngoài cùng, tạm đặt timeout 5 giây và khôi phục giá trị session trước khi trả connection cho pool; SQL Server 1205 retry tối đa hai lần sau rollback. `IdempotencyExecutor` khóa composite `(scope, request_key)` trong cùng transaction với nghiệp vụ, phân biệt key hoa/thường, lưu status/response thành công ít nhất 24 giờ và ánh xạ timeout sang `503 Retry-After: 1`. Dọn key hết hạn theo batch qua expiry index. `AuditWriter` ghi actor, reason và snapshot trong transaction do caller mở; API lấy actor từ principal.
+
+Unit test chạy bằng `mvn test`. SQL Server integration cần database riêng `garage_migration_test` qua `MIGRATION_TEST_URL`; test kiểm session settings, filtered unique index trên connection pool ghi, khóa/replay, rollback audit/version, expiry và cleanup. Không chạy nếu chưa cấu hình database test chuyên dụng.
 
 ## Integration test migration
 
-Profile dùng Flyway/JDBC thực, kiểm tra đủ cột/kiểu/nullable, constraint, index, seed, migrate lần hai, rollback và cạnh tranh idempotency khi commit/rollback.
+Profile dùng Flyway/JDBC thực, kiểm tra metadata, defaults, FK, unique/filter, CHECK, index, seed và chạy lại migration để xác nhận không có thay đổi mới. Cần hai database SQL Server test riêng: `MIGRATION_TEST_URL` cho migrate sạch/rerun và `MIGRATION_TEST_V004_URL` cho nâng cấp V004 với fixture booking `CONFIRMED`; harness kiểm tra `DB_NAME()` riêng cho từng database. Hướng dẫn đầy đủ nằm trong [README migration](src/main/resources/db/migration/README.md).
 
-Chuẩn bị một database SQL Server trống dành riêng cho test, tên garage_migration_test hoặc garage_migration_test_<suffix>. Test kiểm tra tên thực bằng DB_NAME() trước khi chạy Flyway; từ chối database khác hoặc có schema lạ. Test không tạo/xóa database, không chạy Flyway clean. Các fixture được rollback hoặc dọn theo scope riêng; schema và lịch sử migration được giữ cho lần chạy tiếp theo.
+Chuẩn bị hai database SQL Server test riêng: `garage_migration_test` hoặc `garage_migration_test_<suffix>` để chạy sạch/rerun, và `garage_migration_upgrade_test` hoặc `garage_migration_upgrade_test_<suffix>` để nâng từ V004. Test kiểm tra tên thực bằng DB_NAME() trước khi chạy Flyway; từ chối database khác hoặc có schema lạ. Test không tạo/xóa database, không chạy Flyway clean. Fixture booking upgrade được giữ lại để lần chạy sau xác minh lịch sử nâng cấp.
 
 ```sql
 CREATE DATABASE garage_migration_test;
+CREATE DATABASE garage_migration_upgrade_test;
 ```
 
 Ví dụ chạy từ backend bằng tài khoản có quyền DDL/CRUD trong database test:
 
 ```powershell
 $env:MIGRATION_TEST_URL = 'jdbc:sqlserver://localhost:1433;databaseName=garage_migration_test;encrypt=true;trustServerCertificate=true'
+$env:MIGRATION_TEST_V004_URL = 'jdbc:sqlserver://localhost:1433;databaseName=garage_migration_upgrade_test;encrypt=true;trustServerCertificate=true'
 $env:MIGRATION_TEST_USERNAME = 'garage_test_migrator'
 $env:MIGRATION_TEST_PASSWORD = Read-Host 'Mat khau tai khoan test'
 mvn -Psqlserver-it verify
@@ -92,12 +102,13 @@ trustServerCertificate=true trong ví dụ chỉ dành local. Test thiết lập
 
 Native DLL mssql-jdbc_auth-12.10.2.x64.dll đã tải vào cache dự án và kiểm tra chữ ký Microsoft. Cache không được commit; khi thiết lập máy khác cần cung cấp lại DLL đúng phiên bản driver. Xem [hướng dẫn Microsoft](https://learn.microsoft.com/en-us/sql/connect/jdbc/building-the-connection-url).
 
-Sau khi tạo database garage_migration_test, chạy từ backend, trong shell chưa đặt MIGRATION_TEST_USERNAME/PASSWORD:
+Sau khi tạo hai database test, chạy từ backend, trong shell chưa đặt MIGRATION_TEST_USERNAME/PASSWORD:
 
 ```powershell
 $env:PATH = (Resolve-Path '../.cache/migration/native').Path + ';' + $env:PATH
-$env:MIGRATION_TEST_URL = 'jdbc:sqlserver://localhost:51433;databaseName=garage_migration_test;integratedSecurity=true;encrypt=true;trustServerCertificate=true;sendStringParametersAsUnicode=false'
+$env:MIGRATION_TEST_URL = 'jdbc:sqlserver://localhost:51433;databaseName=garage_migration_test;integratedSecurity=true;encrypt=true;trustServerCertificate=true'
+$env:MIGRATION_TEST_V004_URL = 'jdbc:sqlserver://localhost:51433;databaseName=garage_migration_upgrade_test;integratedSecurity=true;encrypt=true;trustServerCertificate=true;sendStringParametersAsUnicode=false'
 mvn -Psqlserver-it verify
 ```
 
-Kết quả lần triển khai này: 12 integration test đạt ở cả lần migrate mới và lần chạy lại. Database nghiệm thu dùng tên ngẫu nhiên và đã được xóa; không áp dụng migration vào database nghiệp vụ. Chi tiết tại [bằng chứng migration](../docs/migration-foundation.md).
+Bộ schema tích hợp V001–V009 có 17 bảng nghiệp vụ/nền và 21 FK, chưa tính bảng lịch sử Flyway. INV-10 đã chạy trên cả hai database test và quan sát migrate sạch, chạy lại 0 migration, nâng V004 lên V009. Bộ test vẫn còn lỗi, xem [bằng chứng INV-10](../docs/plans/phu-tung-ton-kho-handoff.md#bằng-chứng-inv-10). Kết quả schema nền trước SC-02 nằm tại [bằng chứng migration](../docs/migration-foundation.md).

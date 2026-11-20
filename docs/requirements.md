@@ -1,6 +1,6 @@
 # Đặc tả Garage MVP
 
-Trạng thái: schema nền 11 bảng đã có; identity MVP đã có API session, bootstrap Admin, quản lý user và giao diện cơ bản. Các chức năng garage và scheduler chưa triển khai. Tiêu chí chi tiết và giới hạn xác minh xem [plan identity](identity-plan.md). Ngày cập nhật: 17/11/2026.
+Trạng thái: identity MVP, lịch/danh mục dịch vụ và migration danh mục phụ tùng đã có trong source. Guest booking và tra cứu công khai đang được triển khai trên branch `codex/guest-booking-public-lookup`; xem [plan và handoff](plans/guest-booking-public-lookup.md). Chưa nghiệm thu tích hợp SQL Server và trình duyệt cho feature này. Ngày cập nhật: 18/11/2026.
 
 Tài liệu liên quan: [ERD](erd.md), [kiến trúc](architecture.md).
 
@@ -116,6 +116,7 @@ Sau tiếp nhận không dùng thao tác hủy booking. Nếu khách dừng sử
 
 - Ghi nhận tình trạng xe, số km nếu có, công việc thực hiện và ghi chú nội bộ riêng.
 - Dòng `LABOR`: tên công việc, số lượng và đơn giá; có thể liên kết dịch vụ danh mục hoặc là công việc phát sinh.
+- Dòng `LABOR` bị loại khỏi phiếu đang sửa được đánh dấu `voided_at` và `voided_by`, không hard-delete. Chỉ dòng LABOR chưa void mới được hiển thị/tính phí. Không void dòng PART hoặc dòng đã có biến động kho.
 - Dòng `PART`: mỗi phiếu có tối đa một dòng cho mỗi `part_id`; mọi lần xuất/hoàn cùng phụ tùng trên phiếu trỏ vào dòng này. Số lượng bằng tổng xuất trừ tổng hoàn.
 - Lần xuất đầu tạo dòng PART và chụp đơn giá bán; xuất thêm giữ nguyên đơn giá của dòng, kể cả danh mục đã đổi giá. Nếu Staff đổi giá qua thao tác riêng trước hoàn tất, giá mới áp dụng cho toàn bộ số lượng ròng trên dòng, bắt buộc lý do và audit. MVP không tách nhiều giá theo từng lần xuất.
 - Được bổ sung công việc khác dịch vụ đã đặt. Dịch vụ yêu cầu ban đầu vẫn giữ trong booking để đối chiếu.
@@ -128,10 +129,10 @@ Sau tiếp nhận không dùng thao tác hủy booking. Nếu khách dừng sử
 
 - Một danh mục phụ tùng dùng chung một kho. Mỗi phụ tùng có mã unique, tên, đơn vị tính, loại xe áp dụng, giá bán tham khảo, tồn hiện tại và trạng thái hoạt động.
 - Hỗ trợ đơn vị có phần lẻ, ví dụ lít dầu; số lượng tối đa ba chữ số thập phân. Không đổi đơn vị sau khi có biến động kho.
-- `RECEIPT`: Admin nhập số lượng, lý do và ghi chú; không tạo đơn mua hoặc công nợ nhà cung cấp.
-- `ISSUE`: Staff xác nhận dùng trên phiếu đang `IN_PROGRESS`; trừ kho, tạo/cập nhật dòng phụ tùng và ghi ledger trong một transaction.
-- `RETURN`: Staff hoàn một phần hoặc toàn bộ lượng đã xuất trên phiếu còn `IN_PROGRESS`; liên kết giao dịch xuất gốc, tăng kho và giảm lượng tính phí. Hoàn hết vẫn giữ dòng PART và đơn giá; xuất lại trên cùng phiếu dùng lại dòng đó.
-- `ADJUSTMENT`: Admin ghi chênh lệch tăng/giảm có lý do. Không dùng điều chỉnh để giả lập hoàn phụ tùng của phiếu sửa.
+- `RECEIPT`: Admin nhập số lượng dương, lý do bắt buộc sau trim dài 1–500 ký tự và ghi chú tùy chọn tối đa 500 ký tự; ghi chú trống lưu thành `NULL`. Không tạo đơn mua hoặc công nợ nhà cung cấp.
+- `ISSUE`: Staff xác nhận dùng trên phiếu đang `IN_PROGRESS`; trừ kho, tạo/cập nhật dòng phụ tùng và ghi ledger trong một transaction. Lý do ledger được hệ thống ghi mặc định.
+- `RETURN`: Staff hoàn một phần hoặc toàn bộ lượng đã xuất trên phiếu còn `IN_PROGRESS`; liên kết giao dịch xuất gốc, tăng kho và giảm lượng tính phí. Lý do ledger được hệ thống ghi mặc định. Hoàn hết vẫn giữ dòng PART và đơn giá; xuất lại trên cùng phiếu dùng lại dòng đó.
+- `ADJUSTMENT`: Admin ghi chênh lệch khác 0, tăng hoặc giảm, có lý do bắt buộc sau trim dài 1–500 ký tự. Không dùng điều chỉnh để giả lập hoàn phụ tùng của phiếu sửa.
 - Từ chối xuất thiếu tồn, phụ tùng ngừng hoạt động hoặc không phù hợp loại xe; từ chối hoàn quá lượng xuất chưa hoàn.
 - Ledger chỉ thêm mới, không sửa/xóa. Lịch sử thể hiện người thao tác, thời gian, số lượng trước/sau và phiếu liên quan.
 - Phụ tùng ngừng hoạt động vẫn có thể được hoàn kho nếu trước đó đã xuất hợp lệ.
@@ -140,11 +141,13 @@ Sau tiếp nhận không dùng thao tác hủy booking. Nếu khách dừng sử
 
 Hóa đơn trong MVP là chứng từ nội bộ, không phải hóa đơn điện tử. Một phiếu hoàn tất sinh đúng một hóa đơn, mã riêng, lưu tổng tiền cố định; chi tiết lấy từ các dòng phiếu sửa đã khóa.
 
-- Hóa đơn mới ở trạng thái `UNPAID`; Staff đánh dấu `PAID` một lần khi xác nhận đã thu đủ.
+- Hóa đơn mới ở trạng thái `UNPAID`. Staff và Admin được xác nhận thu đủ để chuyển sang `PAID`. Sau khi Admin sửa ghi nhận về `UNPAID`, có thể ghi nhận thu lại.
 - Với tổng tiền lớn hơn 0, ghi số tiền bằng tổng hóa đơn, phương thức `CASH` hoặc `BANK_TRANSFER`, người thu và thời gian thu.
 - Tổng tiền bằng 0 được đánh dấu `PAID` với phương thức `NO_CHARGE` và số tiền thu bằng 0.
 - Không tạo giao dịch ngân hàng hoặc tự xác minh chuyển khoản; nhân viên xác nhận thủ công.
-- Admin được sửa nhầm từ `PAID` về `UNPAID`, bắt buộc lý do và audit snapshot trước/sau; dữ liệu thu hiện tại được xóa khỏi hóa đơn nhưng còn trong audit. Đây là sửa ghi nhận, không phải hoàn tiền thực tế.
+- Admin được sửa ghi nhận từ `PAID` về `UNPAID`, với lý do dài 1–500 ký tự sau khi bỏ khoảng trắng đầu/cuối. Thao tác xóa thông tin thu hiện tại khỏi hóa đơn. Cả thu đủ và sửa ghi nhận đều lưu audit trước/sau cùng người thực hiện. Thao tác sửa chỉ cập nhật hồ sơ nội bộ.
+- Mục Hóa đơn của Staff/Admin có lọc trạng thái và phân trang. Chi tiết hiển thị các dòng đã chốt, tổng tiền và thông tin thu. Phiếu hoàn tất và hóa đơn có liên kết qua lại. UI yêu cầu xác nhận số tiền và phương thức, với nút xác nhận miễn phí riêng cho tổng 0. Chỉ Admin thấy biểu mẫu sửa ghi nhận khi hóa đơn đã thanh toán.
+- Hợp đồng bàn giao tra cứu công khai chỉ bổ sung `totalAmount` và `paymentStatus` khi booking có hóa đơn. Guest Booking tích hợp hai trường này qua projection chỉ đọc.
 - Chưa có đặt cọc, trả nhiều lần, giảm giá, thuế tách riêng hay hoàn tiền.
 
 ## 7. Tra cứu công khai
